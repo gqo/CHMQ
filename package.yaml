@@ -1,0 +1,73 @@
+name:                chmq
+version:             0.1.0.0
+github:              "gqo/chmq"
+license:             BSD3
+author:              "Graeme Ferguson"
+maintainer:          "ggmferguson@gmail.com"
+copyright:           "2019 Graeme Ferguson"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/gqo/chmq#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- network-transport-tcp
+- distributed-process
+- binary
+- bytestring
+- containers
+
+library:
+  source-dirs: src
+
+executables:
+  chmq-client-exe:
+    main:                Main.hs
+    source-dirs:         client
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - chmq
+
+  chmq-server-exe:
+    main:                Main.hs
+    source-dirs:         server
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - chmq
+
+tests:
+  client-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - chmq
+
+  server-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - chmq

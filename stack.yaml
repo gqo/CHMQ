@@ -1,0 +1,6 @@
+flags: {}
+packages:
+- .
+extra-deps:
+- distributed-process-0.7.4@sha256:9e43cb9a27e976e3e4c054e783bdfbd6140760e70997448da66993f4674a6409
+resolver: lts-9.21
