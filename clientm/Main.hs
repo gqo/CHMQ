@@ -2,8 +2,11 @@ module Main where
 
 import Control.Distributed.Process (liftIO)
 import Control.Concurrent (threadDelay)
+import Data.ByteString.Char8 (pack)
+import Control.Lens.Internal.ByteString (unpackStrict8)
 
 import ClientM
+import ClientTypesM
 
 main :: IO ()
 main = do
@@ -15,7 +18,18 @@ main = do
     case eitherCNode of
         Right cNode -> do
             runClient cNode serverAddr serverName $ do
-                publish
-                publish
+                maybeErr <- publish (pack "Hello world!")
+                case maybeErr of
+                    Just err -> do
+                        clog $ "Publish error."
+                    Nothing -> do
+                        clog $ "Publish successful."
+                eitherDeliv <- get
+                case eitherDeliv of
+                    Left err -> do
+                        clog $ "Get error: " ++ show err
+                    Right (ClientDelivery delivId body) -> do
+                        let message = unpackStrict8 body
+                        clog $ "Get successful: {Id: " ++ show delivId ++ ", Body: " ++ message ++ "}"
                 liftIO $ threadDelay 9000000000
         Left error -> print error

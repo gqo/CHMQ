@@ -9,9 +9,13 @@ module ClientTypesM
     , ClientEnv(..)
     , ClientConfig(..)
     , ClientState(..)
+    -- State data types
+    , ClientPublishId
+    , ClientDeliveryId
+    , UnackedDeliveries
     -- Delivery data types
     , ClientDeliveryId
-    , ClientDelivery
+    , ClientDelivery(..)
     -- Client monad type
     , Client
     )
@@ -38,6 +42,7 @@ type ClientId = ProcessId
 type ServerId = ProcessId
 type ClientPublishId = PublishId
 type ClientDeliveryId = DeliveryId
+type UnackedDeliveries = Map ClientDeliveryId DeliveryId
 
 type ClientNode = LocalNode
 
@@ -54,12 +59,16 @@ data ClientConfig = ClientConfig {
 data ClientState = ClientState {
     _nextPublishId :: !ClientPublishId,
     _nextDeliveryId :: !ClientDeliveryId,
-    _unackedDeliveries :: !(Map ClientDeliveryId DeliveryId)
+    _unackedDeliveries :: !(UnackedDeliveries)
 } deriving (Show)
 
 data ClientEnv = ClientEnv {
     conf :: !ClientConfig,
     cState :: !(MVar ClientState)
 }
+
+-- data ClientEnv = 
+--       ClientEnvValid {-# UNPACK #-} !ValidClientEnv
+--     | ClientEnvClosed
 
 type Client = ReaderT ClientEnv Process
