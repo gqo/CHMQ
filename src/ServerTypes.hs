@@ -1,21 +1,21 @@
 module ServerTypes where
 
-import Control.Distributed.Process
+import Control.Distributed.Process (ProcessId, MonitorRef)
 import Data.ByteString (ByteString)
-import qualified Data.Map as Map
+import Data.Map (Map)
 
-import Messages
-import Queue
+import Messages (DeliveryId)
+import Queue (Queue)
 
 type ServerName = String
 
 type ClientId = ProcessId
-type Clients = Map.Map ClientId MonitorRef
+type Clients = Map ClientId MonitorRef
 
 type Item = ByteString
 
-type UnackedItems = Map.Map DeliveryId Item
-type ClientItems = Map.Map ClientId UnackedItems
+type UnackedItems = Map DeliveryId Item
+type ClientItems = Map ClientId UnackedItems
 
 data ServerState = ServerState {
     serverName :: ServerName,

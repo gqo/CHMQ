@@ -24,10 +24,12 @@ runServer state = do
 -- launchServer initializes the server with the address and name passed to it
 launchServer :: ServerName -> Process ()
 launchServer name = do
+    say $ "Launcing CHMQ server with name: " ++ name
     -- get the server's ProcessId
     selfProcId <- getSelfPid
     -- get the server's NodeId
     selfNodeId <- getSelfNode
+    say $ "NodeId: " ++ show selfNodeId
     -- register the server on a remotely accessible table
     registerRemoteAsync selfNodeId name selfProcId
     -- run the server
