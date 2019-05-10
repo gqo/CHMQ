@@ -4,7 +4,10 @@ module ClientM
     , dialServer
     , publish
     , get
+    , ack
+    , nack
     , clog
+    , ClientErr
     )
 where
 
@@ -36,7 +39,7 @@ import Control.Monad.Reader (runReaderT, lift, ask, asks)
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 (pack)
-import qualified Data.Map as Map (empty)
+import qualified Data.Map as Map (empty, insert, lookup, delete)
 
 import Network.Transport (EndPointAddress(EndPointAddress))
 import Network.Transport.TCP (createTransport, defaultTCPParameters)
@@ -65,8 +68,12 @@ import Messages (
     , Get(..)
     , Confirm(..)
     , Delivery(..)
+    , Ack(..)
+    , Nack(..)
     , UnrecognizedClientNotification
     , EmptyQueueNotification
+    , ConnectionClosedNotification
+    , DeliveryId
     )
 
 type Second = Int
@@ -164,18 +171,29 @@ runClient node sAddr sName proc = runProcess node $ do
 clog :: String -> Client ()
 clog msg = lift $ say msg
 
--- showStateVal allows one to print state values via a selector function
-showStateVal :: Show a => (ClientState -> a) -> Client String
-showStateVal f = do
-    val <- getStateVal f
-    return $ show val
-
 -- getStateVal is a helper function to read the value of a part of the ClientState
 getStateVal :: (ClientState -> a) -> Client a
 getStateVal f = do
     mState <- asks cState
     state <- liftIO $ readMVar mState
     return (f state)
+
+-- showStateVal allows one to print state values via a selector function
+showStateVal :: Show a => (ClientState -> a) -> Client String
+showStateVal f = do
+    val <- getStateVal f
+    return $ show val
+
+printStateVal :: Show a => (ClientState -> a) -> Client ()
+printStateVal f = do
+    val <- showStateVal f
+    clog val
+
+printState :: Client ()
+printState = do
+    mState <- asks cState
+    state <- liftIO $ readMVar mState
+    clog $ show state
 
 takeState :: Client ClientState
 takeState = do
@@ -196,11 +214,12 @@ incNextPubId = do
     putState $ ClientState pub' deliv unDelivs
     return pub
 
-incNextDelivId :: Client ()
+incNextDelivId :: Client ClientDeliveryId
 incNextDelivId = do
     (ClientState pub deliv unDelivs) <- takeState
     let deliv' = deliv + 1
     putState $ ClientState pub deliv' unDelivs
+    return deliv
     
 modifyUnackedDelivs :: (UnackedDeliveries -> UnackedDeliveries) -> Client ()
 modifyUnackedDelivs f = do
@@ -208,10 +227,45 @@ modifyUnackedDelivs f = do
     let unDelivs' = f unDelivs
     putState $ ClientState pub deliv unDelivs'
 
+insertDelivery :: ClientDelivery -> ClientDeliveryId -> UnackedDeliveries -> UnackedDeliveries
+insertDelivery (ClientDelivery delivId body) nextDelivId = Map.insert nextDelivId delivId
+
+lookupDelivery :: ClientDeliveryId -> Client (Maybe DeliveryId)
+lookupDelivery clientDelivId = do
+    unDelivs <- getStateVal _unackedDeliveries
+    case Map.lookup clientDelivId unDelivs of
+        Nothing -> return Nothing
+        Just delivId -> return (Just delivId)
+
+deleteDelivery :: ClientDeliveryId -> UnackedDeliveries -> UnackedDeliveries
+deleteDelivery clientDelivId = Map.delete clientDelivId
+
+
+data PublishError = PubTimeout | PubFalseConfirm
+    deriving (Show)
+data GetError = GetTimeout | GetEmptyQueue
+    deriving (Show)
+data AckError = AckFalseClientside | AckFalseServerside
+    deriving (Show)
+data NackError = NackFalseClientside | NackFalseServerside
+    deriving (Show)
+
+
+data ClientErr = PublishErr {
+    publishErr :: PublishError
+} | GetErr {
+    getErr :: GetError
+}| AckErr {
+    ackErr :: AckError
+}| NackErr {
+    nackErr :: NackError
+}| UnrecognizedConn
+    deriving (Show)
+
 data Err = Err
     deriving (Show)
 
-publish :: ByteString -> Client (Maybe Err)
+publish :: ByteString -> Client (Maybe ClientErr)
 publish body = do
     (ClientConfig sPid self) <- asks conf
     pubId <- incNextPubId
@@ -225,22 +279,27 @@ publish body = do
             case maybeErr of
                 Just err -> return (Just err)
                 Nothing -> return Nothing
-        Nothing ->
-            return Nothing
+        Nothing -> do
+            let err = PublishErr PubTimeout
+            return (Just err)
     where
-        confirmHandler :: ClientPublishId -> Confirm -> Process (Maybe Err)
+        confirmHandler :: ClientPublishId -> Confirm -> Process (Maybe ClientErr)
         confirmHandler pubId (Confirm sPubId) =
             case pubId == sPubId of
                 True -> return Nothing
-                False -> return (Just Err)
-        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process (Maybe Err)
-        unrecognizedConnHandler _ = return (Just Err)
+                False -> do
+                    let err = PublishErr PubFalseConfirm
+                    return (Just err)
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process (Maybe ClientErr)
+        unrecognizedConnHandler _ = return (Just UnrecognizedConn)
 
 data GetResponse = GotDelivery {
-    body :: ClientDelivery
-} | EmptyQueue | UnrecognizedConn
+    delivery :: ClientDelivery
+} | GetResponseErr {
+    getResponseErr :: ClientErr
+}
 
-get :: Client (Either Err ClientDelivery)
+get :: Client (Either ClientErr ClientDelivery)
 get = do
     (ClientConfig sPid self) <- asks conf
     lift $ send sPid $ Get self
@@ -252,16 +311,83 @@ get = do
     case maybeResponse of
         Just response ->
             case response of
-                GotDelivery body -> return $ Right body
-                EmptyQueue -> return $ Left Err
-                UnrecognizedConn -> return $ Left Err
-        Nothing -> return $ Left Err
+                GotDelivery delivery -> do
+                    printState
+
+                    nextDelivId <- incNextDelivId
+                    modifyUnackedDelivs $ insertDelivery delivery nextDelivId
+
+                    printState
+
+                    return $ Right delivery
+                GetResponseErr err -> return $ Left err
+        Nothing -> do
+            let err = GetErr GetTimeout
+            return $ Left err
     where
         deliveryHandler :: Delivery -> Process GetResponse
         deliveryHandler (Delivery delivId body) = return $ GotDelivery $ ClientDelivery delivId body
         unrecognizedConnHandler :: UnrecognizedClientNotification -> Process GetResponse
-        unrecognizedConnHandler _ = return $ UnrecognizedConn
+        unrecognizedConnHandler _ = return $ GetResponseErr UnrecognizedConn
         emptyQueueHandler :: EmptyQueueNotification -> Process GetResponse
-        emptyQueueHandler _ = return $ EmptyQueue
-        
+        emptyQueueHandler _ = return $ GetResponseErr $ GetErr GetEmptyQueue
     
+ack :: ClientDeliveryId -> Client (Maybe ClientErr)
+ack clientDelivId = do
+    maybeDelivId <- lookupDelivery clientDelivId
+    case maybeDelivId of
+        Nothing -> do
+            let err = AckErr AckFalseClientside
+            return (Just err)
+        Just delivId -> do
+            (ClientConfig sPid self) <- asks conf
+            lift $ send sPid $ Ack self delivId
+            maybeResponse <- lift $ receiveTimeout (toMicro 1) [
+                  match $ connClosedHandler
+                , match $ unrecognizedConnHandler
+                ]
+            case maybeResponse of
+                Nothing -> do
+                    printState
+
+                    modifyUnackedDelivs $ deleteDelivery clientDelivId
+
+                    printState
+
+                    return Nothing
+                Just err -> return (Just err)
+    where
+        connClosedHandler :: ConnectionClosedNotification -> Process ClientErr
+        connClosedHandler _ = return $ AckErr AckFalseServerside
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientErr
+        unrecognizedConnHandler _ = return UnrecognizedConn
+    
+nack :: ClientDeliveryId -> Client (Maybe ClientErr)
+nack clientDelivId = do
+    maybeDelivId <- lookupDelivery clientDelivId
+    case maybeDelivId of
+        Nothing -> do
+            let err = NackErr NackFalseClientside
+            return (Just err)
+        Just delivId -> do
+            (ClientConfig sPid self) <- asks conf
+            lift $ send sPid $ Nack self delivId
+            maybeResponse <- lift $ receiveTimeout (toMicro 1) [
+                  match $ connClosedHandler
+                , match $ unrecognizedConnHandler
+                ]
+            case maybeResponse of
+                Nothing -> do
+                    printState
+
+                    modifyUnackedDelivs $ deleteDelivery clientDelivId
+
+                    printState
+
+                    return Nothing
+                Just err -> return (Just err)
+    where
+        connClosedHandler :: ConnectionClosedNotification -> Process ClientErr
+        connClosedHandler _ = return $ NackErr NackFalseServerside
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientErr
+        unrecognizedConnHandler _ = return UnrecognizedConn
