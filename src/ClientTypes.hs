@@ -1,33 +1,74 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving  #-}
--- {-# LANGUAGE DeriveAnyClass #-}
--- {-# LANGUAGE DeriveFunctor #-}
-module ClientTypes where
+module ClientTypes
+    ( -- Configuration value types
+      ServerAddress
+    , ServerName
+    , ClientAddress
+    , ClientPort
+    -- Types for initializing connection
+    , ClientNode
+    , ClientEnv(..)
+    , ClientConfig(..)
+    , ClientState(..)
+    -- State data types
+    , ClientPublishId
+    , ClientDeliveryId
+    , UnackedDeliveries
+    -- Delivery data types
+    , ClientDeliveryId
+    , ClientDelivery(..)
+    -- Client monad type
+    , Client
+    )
+where
 
 import Control.Distributed.Process (ProcessId, Process)
 import Control.Distributed.Process.Node (LocalNode)
+
 import Data.Map (Map)
-import qualified Data.Map as Map (empty)
 import Data.ByteString (ByteString)
+
+import Control.Monad.Reader (ReaderT)
+
+import Control.Concurrent.MVar (MVar)
 
 import Messages (PublishId, DeliveryId)
 
 type ServerAddress = String
 type ServerName = String
+type ClientAddress = String
+type ClientPort = String
 
 type ClientId = ProcessId
 type ServerId = ProcessId
 type ClientPublishId = PublishId
 type ClientDeliveryId = DeliveryId
+type UnackedDeliveries = Map ClientDeliveryId DeliveryId
+
+type ClientNode = LocalNode
 
 data ClientDelivery = ClientDelivery {
-    clientDeliveryId :: ClientDeliveryId,
-    clientDeliveryBody :: ByteString
-}
+    id :: ClientDeliveryId,
+    body :: ByteString
+} deriving (Show)
+
+data ClientConfig = ClientConfig {
+    serverId :: !ServerId,
+    selfId :: !ClientId
+} deriving (Show)
 
 data ClientState = ClientState {
-    serverId :: !ServerId,
-    nextPublishId :: !ClientPublishId,
-    nextDeliveryId :: !ClientDeliveryId,
-    unackedDeliveries :: !(Map ClientDeliveryId DeliveryId)
-    -- clientNode :: !LocalNode
+    _nextPublishId :: !ClientPublishId,
+    _nextDeliveryId :: !ClientDeliveryId,
+    _unackedDeliveries :: !(UnackedDeliveries)
+} deriving (Show)
+
+data ClientEnv = ClientEnv {
+    conf :: !ClientConfig,
+    cState :: !(MVar ClientState)
 }
+
+-- data ClientEnv = 
+--       ClientEnvValid {-# UNPACK #-} !ValidClientEnv
+--     | ClientEnvClosed
+
+type Client = ReaderT ClientEnv Process

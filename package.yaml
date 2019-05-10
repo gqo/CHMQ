@@ -44,16 +44,6 @@ executables:
     dependencies:
     - chmq
 
-  chmq-clientm-exe:
-    main:                Main.hs
-    source-dirs:         clientm
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    dependencies:
-    - chmq
-
   chmq-server-exe:
     main:                Main.hs
     source-dirs:         server
