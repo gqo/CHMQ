@@ -8,14 +8,14 @@ import Control.Lens.Internal.ByteString (unpackStrict8)
 import Client
 import ClientTypes
 
-errorHandler :: Client (Maybe ClientErr) -> Client ()
+errorHandler :: Client (Maybe ClientError) -> Client ()
 errorHandler proc = do
     err <- proc
     case err of
         Nothing -> clog $ "Action successful."
         Just err -> clog $ "Received err: " ++ show err
 
-deliveryHandler :: Client (Either ClientErr ClientDelivery) -> Client ()
+deliveryHandler :: Client (Either ClientError ClientDelivery) -> Client ()
 deliveryHandler proc = do
     eitherDeliv <- proc
     case eitherDeliv of

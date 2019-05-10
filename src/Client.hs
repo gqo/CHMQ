@@ -1,13 +1,23 @@
 module Client
-    ( runClient
+    ( 
+    -- Client process runnable
+      runClient
+    -- Connection functionality
     , newClientNode
     , dialServer
+    -- API functionality
     , publish
     , get
     , ack
     , nack
+    -- Debug
     , clog
-    , ClientErr
+    -- Error types
+    , ClientError
+    , PublishError
+    , GetError
+    , AckError
+    , NackError
     )
 where
 
@@ -184,23 +194,27 @@ showStateVal f = do
     val <- getStateVal f
     return $ show val
 
+-- debug function to print current state value
 printStateVal :: Show a => (ClientState -> a) -> Client ()
 printStateVal f = do
     val <- showStateVal f
     clog val
 
+-- debug function to print all current state
 printState :: Client ()
 printState = do
     mState <- asks cState
     state <- liftIO $ readMVar mState
     clog $ show state
 
+-- grabs all modifiable state
 takeState :: Client ClientState
 takeState = do
     mState <- asks cState
     state <- liftIO $ takeMVar mState
     return state
 
+-- updates all modifiable state
 putState :: ClientState -> Client ()
 putState state' = do
     mState <- asks cState
@@ -214,6 +228,7 @@ incNextPubId = do
     putState $ ClientState pub' deliv unDelivs
     return pub
 
+-- increments the deliv id and reutrns the old deliv id
 incNextDelivId :: Client ClientDeliveryId
 incNextDelivId = do
     (ClientState pub deliv unDelivs) <- takeState
@@ -221,12 +236,14 @@ incNextDelivId = do
     putState $ ClientState pub deliv' unDelivs
     return deliv
     
+-- takes a function to update the _unackedDeliveries field, calls it, and updates the state
 modifyUnackedDelivs :: (UnackedDeliveries -> UnackedDeliveries) -> Client ()
 modifyUnackedDelivs f = do
     (ClientState pub deliv unDelivs) <- takeState
     let unDelivs' = f unDelivs
     putState $ ClientState pub deliv unDelivs'
 
+-- inserts a new delivery into an UnackedDeliveries type
 insertDelivery :: ClientDelivery -> ClientDeliveryId -> UnackedDeliveries -> UnackedDeliveries
 insertDelivery (ClientDelivery delivId body) nextDelivId = Map.insert nextDelivId delivId
 
@@ -245,13 +262,13 @@ data PublishError = PubTimeout | PubFalseConfirm
     deriving (Show)
 data GetError = GetTimeout | GetEmptyQueue
     deriving (Show)
-data AckError = AckFalseClientside | AckFalseServerside
+data AckError = AckFalseClientside
     deriving (Show)
-data NackError = NackFalseClientside | NackFalseServerside
+data NackError = NackFalseClientside
     deriving (Show)
 
 
-data ClientErr = PublishErr {
+data ClientError = PublishErr {
     publishErr :: PublishError
 } | GetErr {
     getErr :: GetError
@@ -259,58 +276,76 @@ data ClientErr = PublishErr {
     ackErr :: AckError
 }| NackErr {
     nackErr :: NackError
-}| UnrecognizedConn
+}| UnrecognizedConn | ConnClosed
     deriving (Show)
 
 data Err = Err
     deriving (Show)
 
-publish :: ByteString -> Client (Maybe ClientErr)
+-- publish attempts to send a new ByteString message to the CHMQ server
+publish :: ByteString -> Client (Maybe ClientError)
 publish body = do
+    -- get config data
     (ClientConfig sPid self) <- asks conf
+    -- increment pub id
     pubId <- incNextPubId
+    -- send a publish message to CHMQ server with body data
     lift $ send sPid $ Publish self pubId body
+    -- expect a reply from the CHMQ server in 1 second
     response <- lift $ receiveTimeout (toMicro 1) [
           match $ confirmHandler pubId
         , match $ unrecognizedConnHandler
         ]
     case response of
+        -- if a reply is received,
         Just maybeErr -> do
             case maybeErr of
+                -- check if it's an error and return it
                 Just err -> return (Just err)
+                -- otherwise, return nothing
                 Nothing -> return Nothing
+        -- if a reply is NOT received,
         Nothing -> do
+            -- return a timeout error
             let err = PublishErr PubTimeout
             return (Just err)
     where
-        confirmHandler :: ClientPublishId -> Confirm -> Process (Maybe ClientErr)
+        -- confirmHandler checks if the message is confirmed as recieved by the CHMQ server
+        confirmHandler :: ClientPublishId -> Confirm -> Process (Maybe ClientError)
         confirmHandler pubId (Confirm sPubId) =
             case pubId == sPubId of
                 True -> return Nothing
                 False -> do
                     let err = PublishErr PubFalseConfirm
                     return (Just err)
-        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process (Maybe ClientErr)
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process (Maybe ClientError)
         unrecognizedConnHandler _ = return (Just UnrecognizedConn)
 
 data GetResponse = GotDelivery {
     delivery :: ClientDelivery
 } | GetResponseErr {
-    getResponseErr :: ClientErr
+    getResponseErr :: ClientError
 }
 
-get :: Client (Either ClientErr ClientDelivery)
+-- get attempts to pull a delivery from the CHMQ server queue
+get :: Client (Either ClientError ClientDelivery)
 get = do
+    -- get config data
     (ClientConfig sPid self) <- asks conf
+    -- send a get message
     lift $ send sPid $ Get self
+    -- expect a reply from the CHMQ server in 1 second
     maybeResponse <- lift $ receiveTimeout (toMicro 1) [
           match $ deliveryHandler
         , match $ unrecognizedConnHandler
         , match $ emptyQueueHandler
         ]
     case maybeResponse of
+        -- if a reply is received,
         Just response ->
             case response of
+                -- check if it's a delivery, adding it to the client's unacked 
+                -- items and returning it if so
                 GotDelivery delivery -> do
                     printState
 
@@ -320,11 +355,15 @@ get = do
                     printState
 
                     return $ Right delivery
+                -- if an error was received, return it
                 GetResponseErr err -> return $ Left err
+        -- if a reply is NOT received,
         Nothing -> do
+            -- return a timeout error
             let err = GetErr GetTimeout
             return $ Left err
     where
+        -- deliveryHandler repacks a received delivery into GetResponse
         deliveryHandler :: Delivery -> Process GetResponse
         deliveryHandler (Delivery delivId body) = return $ GotDelivery $ ClientDelivery delivId body
         unrecognizedConnHandler :: UnrecognizedClientNotification -> Process GetResponse
@@ -332,62 +371,82 @@ get = do
         emptyQueueHandler :: EmptyQueueNotification -> Process GetResponse
         emptyQueueHandler _ = return $ GetResponseErr $ GetErr GetEmptyQueue
     
-ack :: ClientDeliveryId -> Client (Maybe ClientErr)
+-- ack attempts to acknowledge a received delivery by it's id
+ack :: ClientDeliveryId -> Client (Maybe ClientError)
 ack clientDelivId = do
+    -- check if the delivery is in the clientside unackedDeliveries first
     maybeDelivId <- lookupDelivery clientDelivId
     case maybeDelivId of
+        -- if it isn't, return a clientside false ack error
         Nothing -> do
             let err = AckErr AckFalseClientside
             return (Just err)
+        -- if it is,
         Just delivId -> do
+            -- get config data
             (ClientConfig sPid self) <- asks conf
+            -- send an ack message
             lift $ send sPid $ Ack self delivId
+            -- expect a reply from the CHMQ server in 1 second
             maybeResponse <- lift $ receiveTimeout (toMicro 1) [
                   match $ connClosedHandler
                 , match $ unrecognizedConnHandler
                 ]
             case maybeResponse of
+                -- if no reply is received (which means no error),
                 Nothing -> do
                     printState
 
+                    -- remove the item from unackedDeliveries
                     modifyUnackedDelivs $ deleteDelivery clientDelivId
 
                     printState
 
                     return Nothing
+                -- if a reply is received, return the error
                 Just err -> return (Just err)
     where
-        connClosedHandler :: ConnectionClosedNotification -> Process ClientErr
-        connClosedHandler _ = return $ AckErr AckFalseServerside
-        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientErr
+        connClosedHandler :: ConnectionClosedNotification -> Process ClientError
+        connClosedHandler _ = return ConnClosed
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientError
         unrecognizedConnHandler _ = return UnrecognizedConn
     
-nack :: ClientDeliveryId -> Client (Maybe ClientErr)
+-- nack attempts to negatively acknowledge a received delivery by it's id
+nack :: ClientDeliveryId -> Client (Maybe ClientError)
 nack clientDelivId = do
+    -- check if the delivery is in the clientside unackedDeliveries first
     maybeDelivId <- lookupDelivery clientDelivId
     case maybeDelivId of
+        -- if it isn't, return a clientside false nack error
         Nothing -> do
             let err = NackErr NackFalseClientside
             return (Just err)
+        -- if it is,
         Just delivId -> do
+            -- get config data
             (ClientConfig sPid self) <- asks conf
+            -- send a nack message
             lift $ send sPid $ Nack self delivId
+            -- expect a reply from the CHMQ server in 1 second
             maybeResponse <- lift $ receiveTimeout (toMicro 1) [
                   match $ connClosedHandler
                 , match $ unrecognizedConnHandler
                 ]
             case maybeResponse of
+                -- if no reply is received (which means no error),
                 Nothing -> do
                     printState
 
+                    -- remove the item from unackedDeliveries
                     modifyUnackedDelivs $ deleteDelivery clientDelivId
 
                     printState
 
                     return Nothing
+                -- if a reply is received, return the error
                 Just err -> return (Just err)
     where
-        connClosedHandler :: ConnectionClosedNotification -> Process ClientErr
-        connClosedHandler _ = return $ NackErr NackFalseServerside
-        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientErr
+        connClosedHandler :: ConnectionClosedNotification -> Process ClientError
+        connClosedHandler _ = return ConnClosed
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientError
         unrecognizedConnHandler _ = return UnrecognizedConn

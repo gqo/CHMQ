@@ -10,10 +10,9 @@ module ClientTypes
     , ClientConfig(..)
     , ClientState(..)
     -- State data types
-    , ClientPublishId
-    , ClientDeliveryId
     , UnackedDeliveries
     -- Delivery data types
+    , ClientPublishId
     , ClientDeliveryId
     , ClientDelivery(..)
     -- Client monad type
@@ -66,9 +65,5 @@ data ClientEnv = ClientEnv {
     conf :: !ClientConfig,
     cState :: !(MVar ClientState)
 }
-
--- data ClientEnv = 
---       ClientEnvValid {-# UNPACK #-} !ValidClientEnv
---     | ClientEnvClosed
 
 type Client = ReaderT ClientEnv Process
