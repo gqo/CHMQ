@@ -81,7 +81,8 @@ import Messages (
     , Ack(..)
     , Nack(..)
     , UnrecognizedClientNotification
-    , EmptyQueueNotification
+    -- , EmptyQueueNotification
+    , GetErrorNotification(..)
     , ConnectionClosedNotification
     , DeliveryId
     )
@@ -290,7 +291,7 @@ publish body = do
     -- increment pub id
     pubId <- incNextPubId
     -- send a publish message to CHMQ server with body data
-    lift $ send sPid $ Publish self pubId body
+    lift $ send sPid $ Publish self pubId body "default"
     -- expect a reply from the CHMQ server in 1 second
     response <- lift $ receiveTimeout (toMicro 1) [
           match $ confirmHandler pubId
@@ -333,7 +334,7 @@ get = do
     -- get config data
     (ClientConfig sPid self) <- asks conf
     -- send a get message
-    lift $ send sPid $ Get self
+    lift $ send sPid $ Get self "default"
     -- expect a reply from the CHMQ server in 1 second
     maybeResponse <- lift $ receiveTimeout (toMicro 1) [
           match $ deliveryHandler
@@ -368,7 +369,7 @@ get = do
         deliveryHandler (Delivery delivId body) = return $ GotDelivery $ ClientDelivery delivId body
         unrecognizedConnHandler :: UnrecognizedClientNotification -> Process GetResponse
         unrecognizedConnHandler _ = return $ GetResponseErr UnrecognizedConn
-        emptyQueueHandler :: EmptyQueueNotification -> Process GetResponse
+        emptyQueueHandler :: GetErrorNotification -> Process GetResponse
         emptyQueueHandler _ = return $ GetResponseErr $ GetErr GetEmptyQueue
     
 -- ack attempts to acknowledge a received delivery by it's id

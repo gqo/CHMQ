@@ -18,6 +18,8 @@ runServer state = do
         , match $ ackHandler state
         , match $ nackHandler state
         , match $ disconnectHandler state
+        , match $ queueDeclareHandler state
+        , match $ consumeHandler state
         ]
     runServer state'
 
@@ -33,4 +35,4 @@ launchServer name = do
     -- register the server on a remotely accessible table
     registerRemoteAsync selfNodeId name selfProcId
     -- run the server
-    runServer $ ServerState name Map.empty Map.empty Seq.empty 0
+    runServer $ ServerState name Map.empty Map.empty Map.empty 0
