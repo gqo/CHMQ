@@ -116,6 +116,7 @@ instance Binary QueueDeclare
 -- Consume message for continuous consumption from a queue on the server
 data Consume = Consume {
     consumeId :: ProcessId,
+    consumeName :: QueueName,
     exclusive :: Bool
 } deriving (Typeable, Generic, Show)
 

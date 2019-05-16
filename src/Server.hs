@@ -1,7 +1,6 @@
 module Server where
 
 import Control.Distributed.Process
-import qualified Data.Sequence as Seq
 import qualified Data.Map as Map
 
 import ServerTypes
