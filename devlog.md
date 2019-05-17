@@ -29,3 +29,6 @@
 12. Additionally, changed when the unackedItems list is not found for a connected client to close the connection
 13. Next step: add disconnect handler (similar to close connection behavior), begin work on client package
 14. Handle disconnections and write launchServer function to register server given a name
+
+
+When designing consumer behavior, initially assumed it would be okay to simply forward messages in publish but, if a client disconnects, that behavior must also happen when a unacked items are pushed back onto a the server queues

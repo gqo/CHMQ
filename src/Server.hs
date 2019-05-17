@@ -1,7 +1,6 @@
 module Server where
 
 import Control.Distributed.Process
-import qualified Data.Sequence as Seq
 import qualified Data.Map as Map
 
 import ServerTypes
@@ -18,6 +17,9 @@ runServer state = do
         , match $ ackHandler state
         , match $ nackHandler state
         , match $ disconnectHandler state
+        , match $ queueDeclareHandler state
+        , match $ consumeHandler state
+        , match $ stopConsumeHandler state
         ]
     runServer state'
 
@@ -33,4 +35,4 @@ launchServer name = do
     -- register the server on a remotely accessible table
     registerRemoteAsync selfNodeId name selfProcId
     -- run the server
-    runServer $ ServerState name Map.empty Map.empty Seq.empty 0
+    runServer $ ServerState name Map.empty Map.empty Map.empty 0
