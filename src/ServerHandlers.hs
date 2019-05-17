@@ -223,8 +223,8 @@ handledUnacked state unackedItems = do
 -- Removes client as consumer from server queue
 removeConsumption :: ClientId -> ServerQueue -> ServerQueue
 removeConsumption clientId (ServerQueue queue exFlag consumers)
-    | isEmpty consumers = (ServerQueue queue exFlag consumers)
     | isElem clientId consumers = removeConsumer clientId (ServerQueue queue exFlag consumers)
+    | otherwise = (ServerQueue queue exFlag consumers)
         where
             removeConsumer :: ClientId -> ServerQueue -> ServerQueue
             removeConsumer clientId (ServerQueue queue exFlag consumers)
@@ -478,6 +478,35 @@ consumeHandler
                                                     queues' = Map.insert queueName sQueue queues
                                                 return $ ServerState name clients clientItems queues' nextDelivId
 
+-- Handler function for stop consume messages
+stopConsumeHandler :: ServerState -> StopConsume -> Process ServerState
+stopConsumeHandler
+    (ServerState name clients clientItems queues nextDelivId)
+    (StopConsume stopperId queueName) = do
+        say $ "Received stop consume message from" ++ show stopperId
+        let state = ServerState name clients clientItems queues nextDelivId
+        case Map.notMember stopperId clients of
+            -- If message received from unconnected client
+            True -> do
+                say "Client was unconnected. Dropping message..."
+                -- Drop message and return state
+                return state
+            -- If message received from connected client
+            False -> do
+                say "Looking up server queue..."
+                case Map.lookup queueName queues of
+                    -- If queue doesn't exist,
+                    Nothing -> do
+                        say "Queue was not found. Dropping message..."
+                        -- Drop message and return state
+                        return state
+                    -- If queue does exist,
+                    Just sQueue -> do
+                        say "Queue found. Removing consumer..."
+                        let sQueue' = removeConsumption stopperId sQueue
+                            queues' = Map.insert queueName sQueue' queues
+                        return $ ServerState name clients clientItems queues' nextDelivId
+                                            
 -- publishHandler :: ServerState -> Publish -> Process ServerState
 -- publishHandler state _ = return state
 

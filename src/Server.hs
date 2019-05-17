@@ -19,6 +19,7 @@ runServer state = do
         , match $ disconnectHandler state
         , match $ queueDeclareHandler state
         , match $ consumeHandler state
+        , match $ stopConsumeHandler state
         ]
     runServer state'
 

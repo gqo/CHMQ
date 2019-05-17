@@ -10,6 +10,8 @@ module Client
     , get
     , ack
     , nack
+    , declareQueue
+    , consume
     -- Debug
     , clog
     -- Error types
@@ -35,6 +37,7 @@ import Control.Distributed.Process (
     , getSelfPid
     , say
     , receiveTimeout
+    , receiveWait
     , match
     )
 import Control.Distributed.Process.Node (
@@ -80,11 +83,16 @@ import Messages (
     , Delivery(..)
     , Ack(..)
     , Nack(..)
+    , Consume(..)
+    , QueueDeclare(..)
+    , StopConsume(..)
     , UnrecognizedClientNotification
-    -- , EmptyQueueNotification
     , GetErrorNotification(..)
     , ConnectionClosedNotification
+    , ConsumeErrorNotification(..)
+    , UnrecognizedQueueNameNotification
     , DeliveryId
+    , QueueName
     )
 
 type Second = Int
@@ -245,8 +253,8 @@ modifyUnackedDelivs f = do
     putState $ ClientState pub deliv unDelivs'
 
 -- inserts a new delivery into an UnackedDeliveries type
-insertDelivery :: ClientDelivery -> ClientDeliveryId -> UnackedDeliveries -> UnackedDeliveries
-insertDelivery (ClientDelivery delivId body) nextDelivId = Map.insert nextDelivId delivId
+insertDelivery :: DeliveryId -> ClientDeliveryId -> UnackedDeliveries -> UnackedDeliveries
+insertDelivery sDelivId nextDelivId = Map.insert nextDelivId sDelivId
 
 lookupDelivery :: ClientDeliveryId -> Client (Maybe DeliveryId)
 lookupDelivery clientDelivId = do
@@ -261,11 +269,13 @@ deleteDelivery clientDelivId = Map.delete clientDelivId
 
 data PublishError = PubTimeout | PubFalseConfirm
     deriving (Show)
-data GetError = GetTimeout | GetEmptyQueue
+data GetError = GetTimeout | GetEmptyQueue | GetExclusive
     deriving (Show)
 data AckError = AckFalseClientside
     deriving (Show)
 data NackError = NackFalseClientside
+    deriving (Show)
+data ConsumeError = ConsumeOnExclusive | ConsumeExclusiveOnConsumed
     deriving (Show)
 
 
@@ -277,24 +287,28 @@ data ClientError = PublishErr {
     ackErr :: AckError
 }| NackErr {
     nackErr :: NackError
-}| UnrecognizedConn | ConnClosed
+}| ConsumeErr {
+    consumeErr :: ConsumeError
+}| UnrecognizedConn | ConnClosed | UnrecognizedQueue
     deriving (Show)
 
 data Err = Err
     deriving (Show)
 
--- publish attempts to send a new ByteString message to the CHMQ server
-publish :: ByteString -> Client (Maybe ClientError)
-publish body = do
+-- publish attempts to send a new ByteString message to the CHMQ server queue 
+-- specified by name
+publish :: QueueName -> ByteString -> Client (Maybe ClientError)
+publish queueName body = do
     -- get config data
     (ClientConfig sPid self) <- asks conf
     -- increment pub id
     pubId <- incNextPubId
     -- send a publish message to CHMQ server with body data
-    lift $ send sPid $ Publish self pubId body "default"
+    lift $ send sPid $ Publish self pubId body queueName
     -- expect a reply from the CHMQ server in 1 second
     response <- lift $ receiveTimeout (toMicro 1) [
           match $ confirmHandler pubId
+        , match $ unrecognizedQueueHandler
         , match $ unrecognizedConnHandler
         ]
     case response of
@@ -319,27 +333,30 @@ publish body = do
                 False -> do
                     let err = PublishErr PubFalseConfirm
                     return (Just err)
+        unrecognizedQueueHandler :: UnrecognizedQueueNameNotification -> Process (Maybe ClientError)
+        unrecognizedQueueHandler _ = return (Just UnrecognizedQueue)
         unrecognizedConnHandler :: UnrecognizedClientNotification -> Process (Maybe ClientError)
         unrecognizedConnHandler _ = return (Just UnrecognizedConn)
 
 data GetResponse = GotDelivery {
-    delivery :: ClientDelivery
+    delivery :: Delivery
 } | GetResponseErr {
     getResponseErr :: ClientError
 }
 
--- get attempts to pull a delivery from the CHMQ server queue
-get :: Client (Either ClientError ClientDelivery)
-get = do
+-- get attempts to pull a delivery from the CHMQ server queue specified by name
+get :: QueueName -> Client (Either ClientError ClientDelivery)
+get queueName = do
     -- get config data
     (ClientConfig sPid self) <- asks conf
     -- send a get message
-    lift $ send sPid $ Get self "default"
+    lift $ send sPid $ Get self queueName
     -- expect a reply from the CHMQ server in 1 second
     maybeResponse <- lift $ receiveTimeout (toMicro 1) [
           match $ deliveryHandler
         , match $ unrecognizedConnHandler
-        , match $ emptyQueueHandler
+        , match $ unrecognizedQueueHandler
+        , match $ getErrorHandler
         ]
     case maybeResponse of
         -- if a reply is received,
@@ -347,15 +364,16 @@ get = do
             case response of
                 -- check if it's a delivery, adding it to the client's unacked 
                 -- items and returning it if so
-                GotDelivery delivery -> do
+                GotDelivery (Delivery delivId body) -> do
                     printState
 
                     nextDelivId <- incNextDelivId
-                    modifyUnackedDelivs $ insertDelivery delivery nextDelivId
+                    modifyUnackedDelivs $ insertDelivery delivId nextDelivId
 
                     printState
 
-                    return $ Right delivery
+                    let clientDelivery = ClientDelivery nextDelivId body
+                    return $ Right clientDelivery
                 -- if an error was received, return it
                 GetResponseErr err -> return $ Left err
         -- if a reply is NOT received,
@@ -366,11 +384,16 @@ get = do
     where
         -- deliveryHandler repacks a received delivery into GetResponse
         deliveryHandler :: Delivery -> Process GetResponse
-        deliveryHandler (Delivery delivId body) = return $ GotDelivery $ ClientDelivery delivId body
+        deliveryHandler delivery = return $ GotDelivery delivery
         unrecognizedConnHandler :: UnrecognizedClientNotification -> Process GetResponse
         unrecognizedConnHandler _ = return $ GetResponseErr UnrecognizedConn
-        emptyQueueHandler :: GetErrorNotification -> Process GetResponse
-        emptyQueueHandler _ = return $ GetResponseErr $ GetErr GetEmptyQueue
+        unrecognizedQueueHandler :: UnrecognizedQueueNameNotification -> Process GetResponse
+        unrecognizedQueueHandler _ = return $ GetResponseErr UnrecognizedQueue
+        getErrorHandler :: GetErrorNotification -> Process GetResponse
+        getErrorHandler err = 
+            case err of
+                EmptyQueueNotification -> return $ GetResponseErr $ GetErr GetEmptyQueue
+                ExclusiveConsumerNotification -> return $ GetResponseErr $ GetErr GetExclusive
     
 -- ack attempts to acknowledge a received delivery by it's id
 ack :: ClientDeliveryId -> Client (Maybe ClientError)
@@ -449,5 +472,82 @@ nack clientDelivId = do
     where
         connClosedHandler :: ConnectionClosedNotification -> Process ClientError
         connClosedHandler _ = return ConnClosed
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientError
+        unrecognizedConnHandler _ = return UnrecognizedConn
+
+-- declareQueue attempts to declare a name queue on the server
+declareQueue :: QueueName -> Client (Maybe ClientError)
+declareQueue queueName = do
+    -- get config data
+    (ClientConfig sPid self) <- asks conf
+    -- send a queue declare message
+    lift $ send sPid $ QueueDeclare self queueName
+    -- expect a reply from the CHMQ server in 1 second
+    maybeResponse <- lift $ receiveTimeout (toMicro 1) [
+          match $ unrecognizedConnHandler
+        ]
+    case maybeResponse of
+        -- if no reply is received (which means no error),
+        Nothing -> return Nothing
+        -- if a reply is received, return the error
+        Just err -> return (Just err)
+    where
+        unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientError
+        unrecognizedConnHandler _ = return UnrecognizedConn
+
+runConsume :: QueueName -> (ClientDelivery -> Client (Maybe a)) -> Client a
+runConsume queueName handler = do
+    -- expect a reply and block until one is received
+    (Delivery delivId body) <- lift $ receiveWait [
+          match $ deliveryHandler
+        ]
+
+    nextDelivId <- incNextDelivId
+    modifyUnackedDelivs $ insertDelivery delivId nextDelivId
+
+    let clientDelivery = ClientDelivery nextDelivId body
+
+    -- run given handler on the delivery, stopping consumption if data is returned
+    maybeReturn <- handler clientDelivery
+    case maybeReturn of
+        Just returnData -> do
+            -- get config data
+            (ClientConfig sPid self) <- asks conf
+            -- send a stop consume message to server
+            lift $ send sPid $ StopConsume self queueName
+            -- return data
+            return returnData
+        Nothing -> runConsume queueName handler
+
+    where
+        deliveryHandler :: Delivery -> Process Delivery
+        deliveryHandler delivery = return delivery
+
+consume :: QueueName -> Bool -> (ClientDelivery -> Client (Maybe a)) -> Client (Either ClientError a)
+consume queueName exclusive handler = do
+    -- get config data
+    (ClientConfig sPid self) <- asks conf
+    -- send a consume message
+    lift $ send sPid $ Consume self queueName exclusive
+    -- expect a reply from the CHMQ server in 1 second
+    maybeResponse <- lift $ receiveTimeout (toMicro 1) [
+          match $ consumeErrorHandler
+        , match $ unrecognizedConnHandler
+        ]
+    case maybeResponse of
+        -- if a reply is received, return error
+        Just err -> return $ Left err
+        -- if a reply isn't received (which means no error),
+        Nothing -> do
+            -- start consuming deliveries with the handler provided
+            returnData <- runConsume queueName handler
+            -- return data that's returned
+            return $ Right returnData
+    where
+        consumeErrorHandler :: ConsumeErrorNotification -> Process ClientError
+        consumeErrorHandler err =
+            case err of
+                RegisteredExclusiveConsumer -> return $ ConsumeErr ConsumeOnExclusive
+                RegisteredConsumersOnExclusive -> return $ ConsumeErr ConsumeExclusiveOnConsumed
         unrecognizedConnHandler :: UnrecognizedClientNotification -> Process ClientError
         unrecognizedConnHandler _ = return UnrecognizedConn

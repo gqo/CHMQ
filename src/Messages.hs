@@ -122,6 +122,13 @@ data Consume = Consume {
 
 instance Binary Consume
 
+data StopConsume = StopConsume {
+    stopConsumeId :: ProcessId,
+    stopConsumeName :: QueueName
+} deriving (Typeable, Generic, Show)
+
+instance Binary StopConsume
+
 data ConsumeErrorNotification = 
     -- RegisteredExclusiveConsumer reason is sent when there is a pre-existing
     -- exclusive consumer for said queue
